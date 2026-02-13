@@ -1,1 +1,151 @@
+name: Generate Clash Subscription Daily
+on:
+  schedule:
+    - cron: '0 4 * * *'   # 每天北京时间 12:00（UTC+8 → UTC 04:00）
+  workflow_dispatch:       # 手动触发支持
 
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Python & jq
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3 jq
+
+      - name: Generate proxies from nodes.txt
+        id: gen
+        run: |
+          # 将 nodes.txt 转为 Clash proxies YAML（支持 ss/vmess/trojan）
+          python3 << 'EOF'
+import base64
+import json
+import sys
+import re
+
+def parse_ss(link):
+    # ss://base64(method:password)@host:port#name
+    if not link.startswith('ss://'):
+        return None
+    try:
+        part = link[5:]
+        if '#' in part:
+            part, name = part.split('#', 1)
+        else:
+            name = 'SS'
+        if '@' not in part:
+            return None
+        cred, addr = part.split('@', 1)
+        cred = base64.b64decode(cred).decode()
+        method, password = cred.split(':', 1)
+        host, port = addr.split(':', 1)
+        return {
+            'name': name,
+            'type': 'ss',
+            'server': host,
+            'port': int(port),
+            'cipher': method,
+            'udp': True,
+            'password': password
+        }
+    except Exception as e:
+        print("SS parse error:", e, file=sys.stderr)
+        return None
+
+def parse_vmess(link):
+    if not link.startswith('vmess://'):
+        return None
+    try:
+        data = base64.b64decode(link[8:]).decode()
+        cfg = json.loads(data)
+        name = cfg.get('ps', 'VMess')
+        return {
+            'name': name,
+            'type': 'vmess',
+            'server': cfg['host'],
+            'port': int(cfg['port']),
+            'uuid': cfg['id'],
+            'alterId': int(cfg.get('aid', 0)),
+            'cipher': 'auto',
+            'tls': cfg.get('tls', False),
+            'skip-cert-verify': True,
+            'servername': cfg.get('sni', ''),
+            'network': cfg.get('net', 'tcp'),
+            'udp': True
+        }
+    except Exception as e:
+        print("VMess parse error:", e, file=sys.stderr)
+        return None
+
+def parse_trojan(link):
+    if not link.startswith('trojan://'):
+        return None
+    try:
+        part = link[9:]
+        if '#' in part:
+            part, name = part.split('#', 1)
+        else:
+            name = 'Trojan'
+        password, addr = part.split('@', 1)
+        host, port = addr.split(':', 1)
+        return {
+            'name': name,
+            'type': 'trojan',
+            'server': host,
+            'port': int(port),
+            'password': password,
+            'sni': '',
+            'alpn': ['h2', 'http/1.1'],
+            'skip-cert-verify': True,
+            'udp': True
+        }
+    except Exception as e:
+        print("Trojan parse error:", e, file=sys.stderr)
+        return None
+
+proxies = []
+with open('nodes.txt') as f:
+    for line in f:
+        line = line.strip()
+        if not line or line.startswith('#'): continue
+        p = None
+        if line.startswith('ss://'): p = parse_ss(line)
+        elif line.startswith('vmess://'): p = parse_vmess(line)
+        elif line.startswith('trojan://'): p = parse_trojan(line)
+        if p:
+            proxies.append(p)
+
+# 写入 proxies.yaml 片段
+with open('proxies.yaml', 'w') as f:
+    f.write('proxies:\n')
+    for p in proxies:
+        f.write(f"  - name: \"{p['name']}\"\n")
+        for k, v in p.items():
+            if k == 'name': continue
+            if isinstance(v, bool):
+                f.write(f"    {k}: {str(v).lower()}\n")
+            elif isinstance(v, str) and '\n' in v:
+                f.write(f"    {k}: |\n      {v.replace('\\n', '\\n      ')}\n")
+            else:
+                f.write(f"    {k}: {repr(v) if isinstance(v, str) else v}\n")
+
+# 生成最终 sub.yaml（合并模板 + proxies）
+with open('sub.yaml.template') as f:
+    template = f.read()
+with open('proxies.yaml') as f:
+    proxies_yaml = f.read()
+
+final = template.replace('{{PROXIES}}', proxies_yaml)
+with open('sub.yaml', 'w') as f:
+    f.write(final)
+EOF
+
+      - name: Commit updated sub.yaml
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: '🤖 Daily update: $(date -u)'
+          branch: main
+
+      - name: Show result
+        run: cat sub.yaml | head -n 20
