@@ -1,1 +1,22 @@
+port: 7890
+socks-port: 7891
+allow-lan: true
+mode: Rule
+log-level: info
+external-controller: '0.0.0.0:9090'
 
+# 代理组（由脚本动态填充）
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - DIRECT
+      - AUTO
+      - SS-Node1
+      - VMess-Node1
+      - Trojan-Node1
+
+rules:
+  - DOMAIN-SUFFIX,google.com,PROXY
+  - DOMAIN-KEYWORD,youtube,PROXY
+  - FINAL,DIRECT
